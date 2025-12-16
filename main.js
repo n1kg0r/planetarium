@@ -56,50 +56,83 @@ const atmosphere = {
 ================================ */
 
 const STAR_COUNT = 1500;
-const stars = [];
+// const stars = [];
 
-for (let i = 0; i < STAR_COUNT; i++) {
-  stars.push({
-    az: Math.random() * Math.PI * 2,      // azimuth
-    alt: (Math.random() - 0.1) * Math.PI * 0.55,   // altitude (above horizon)
-    mag: Math.random() * 1.5 + 0.3,       // brightness proxy
-    a: Math.random() * 0.5 + 0.4
-  });
+// for (let i = 0; i < STAR_COUNT; i++) {
+//   stars.push({
+//     az: Math.random() * Math.PI * 2,      // azimuth
+//     alt: (Math.random() - 0.1) * Math.PI * 0.55,   // altitude (above horizon)
+//     mag: Math.random() * 1.5 + 0.3,       // brightness proxy
+//     a: Math.random() * 0.5 + 0.4
+//   });
+// }
+
+let stars = [];
+let starById = {};
+
+function indexStars() {
+  starById = {};
+  for (const s of stars) {
+    starById[s.id] = s;
+  }
 }
+
+fetch("stars.json")
+  .then(res => res.json())
+  .then(data => {
+    stars = data
+      .filter(s => Number(s.MAG) <= 6.5) // naked-eye limit
+      .map(s => ({
+        id: s["harvard_ref_#"],
+        ra: raToRad(s.RA),
+        dec: decToRad(s.DEC),
+        mag: Number(s.MAG),
+        a: Math.max(0.2, 1.0 - Number(s.MAG) / 7)
+      }));
+      indexStars(); // ← REQUIRED
+  });
+
+
+
+let constellations = {};
+
+fetch("constellations.json")
+  .then(res => res.json())
+  .then(data => constellations = data);
+
+
+
+
+
+
+
+
 
 /* ===============================
    Projection (dome, no edges)
 ================================ */
-
 function projectStar(s) {
-  // Convert star to direction vector
-  const x = Math.cos(s.alt) * Math.cos(s.az);
-  const y = Math.cos(s.alt) * Math.sin(s.az);
-  const z = Math.sin(s.alt);
+  // Convert RA/DEC to direction vector
+  const x = Math.cos(s.dec) * Math.cos(s.ra);
+  const y = Math.cos(s.dec) * Math.sin(s.ra);
+  const z = Math.sin(s.dec);
 
-  // Rotate by camera yaw
-  const cosYaw = Math.cos(-camera.yaw);
-  const sinYaw = Math.sin(-camera.yaw);
-  let dx = x * cosYaw - y * sinYaw;
-  let dy = x * sinYaw + y * cosYaw;
+  // Apply camera yaw
+  const cy = Math.cos(camera.yaw);
+  const sy = Math.sin(camera.yaw);
+  let dx = x * cy - y * sy;
+  let dy = x * sy + y * cy;
   let dz = z;
 
-  // Rotate by camera pitch
-  // Rotate by camera pitch (planetarium mode)
-  // Rotate by camera pitch (planetarium mode)
-  const cosPitch = Math.cos(camera.pitch);
-  const sinPitch = Math.sin(camera.pitch);
-
-  const dz2 = dz * cosPitch + dx * sinPitch;
-  dx = -dz * sinPitch + dx * cosPitch;
+  // Apply camera pitch (planetarium mode)
+  const cp = Math.cos(camera.pitch);
+  const sp = Math.sin(camera.pitch);
+  const dz2 = dz * cp + dx * sp;
+  dx = -dz * sp + dx * cp;
   dz = dz2;
 
-
-
-  // Star behind camera → not visible
   if (dz <= 0) return null;
 
-  // Perspective projection
   const f = 0.5 * window.innerHeight / Math.tan(camera.fov / 2);
 
   return {
@@ -107,6 +140,7 @@ function projectStar(s) {
     y: window.innerHeight / 2 - (dx / dz) * f
   };
 }
+
 
 
 /* ===============================
@@ -193,12 +227,39 @@ function drawSky() {
     if (!p) continue;
 
     ctx.beginPath();
-    const extinction = Math.pow(Math.sin(s.alt), 0.4);
-    ctx.fillStyle = `rgba(255,255,255,${s.a * extinction})`;
+    // const extinction = Math.pow(Math.sin(s.alt), 0.4);
+    // const extinction = Math.pow(Math.max(0.1, dz), 0.4);
+
+    ctx.fillStyle = `rgba(255,255,255,${s.a})`;
+
 
     const r = Math.max(0.6, 1.5 - s.mag);
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+
+
+
+
+  ctx.strokeStyle = "rgba(150,180,255,0.25)";
+  ctx.lineWidth = 1;
+
+  for (const abr in constellations) {
+    for (const [a, b] of constellations[abr]) {
+      const sa = starById[a];
+      const sb = starById[b];
+      if (!sa || !sb) continue;
+
+      const pa = projectStar(sa);
+      const pb = projectStar(sb);
+      if (!pa || !pb) continue;
+
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
+    }
   }
 
 
@@ -232,7 +293,7 @@ function drawSky() {
     lastY = e.clientY;
 
     // Camera rotation
-    camera.yaw += dx * 0.002;
+    camera.yaw -= dx * 0.002;
     camera.pitch = Math.max(
       -Math.PI / 2,
       Math.min(0, camera.pitch + dy * 0.002)
@@ -276,7 +337,7 @@ function drawSky() {
     const dt = (time - lastTime) / 1000;
     lastTime = time;
 
-    camera.yaw += dt * 0.005;// very slow celestial drift
+    camera.yaw += dt * 0.02;// very slow celestial drift
 
     atmosphere.x *= 0.98;
     atmosphere.y *= 0.98;
