@@ -1,5 +1,6 @@
 const STAR_COUNT = 1500;
 
+let currentLST = 0;
 
 const NAMED_STARS = [
   {
@@ -116,6 +117,21 @@ const CONSTELLATION_NAMES = {
 
 
 
+const story = {
+  enabled: false,
+  activeConstellation: null,
+  startTime: 0,
+  phase: "idle" // "zoom-in" → "hold" → "zoom-out"
+};
+
+
+const visitedConstellations = [];
+const MAX_VISITED = 6; // tweak: how much memory the story has
+
+
+const STORY_INTERVAL = 10_000; // 10 seconds
+const ZOOM_FACTOR = 0.9;      // 10% zoom in
+const ZOOM_SPEED = 0.05;      // interpolation speed
 
 
 
@@ -169,6 +185,7 @@ const camera = {
 };
 
 
+const BASE_FOV = camera.fov;
 
 
 const atmosphere = {
@@ -323,12 +340,13 @@ let projectedStars = [];
    Projection (dome, no edges)
 ================================ */
 function projectStar(s) {
-  const lst = getLocalSiderealTime(Date.now(), observer.lon);
+
+
   const { alt, az } = raDecToAltAz(
     s.ra,
     s.dec,
     observer.lat,
-    lst
+    currentLST
   );
 
   // Below horizon → invisible
@@ -451,6 +469,8 @@ function drawBackground() {
 
 
 function drawSky() {
+
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   drawBackground();
@@ -484,6 +504,14 @@ function drawSky() {
   ctx.lineWidth = 1;
 
   for (const abr in constellations) {
+
+
+    const isActive = story.enabled && story.activeConstellation === abr;
+    ctx.strokeStyle = isActive
+      ? "rgba(220,230,255,0.8)"
+      : "rgba(150,180,255,0.25)";
+    ctx.lineWidth = isActive ? 2 : 1;
+
     for (const [a, b] of constellations[abr]) {
       const sa = starById[a];
       const sb = starById[b];
@@ -503,10 +531,20 @@ function drawSky() {
 
 
 
-  const hoveredStar = findHoveredStar();
-  const hoveredConstellation = hoveredStar
-    ? null
-    : findHoveredConstellation();
+  let hoveredStar = null;
+  let hoveredConstellation = null;
+
+  if (story.enabled && story.activeConstellation) {
+    hoveredConstellation =
+      CONSTELLATION_NAMES[story.activeConstellation] ??
+      story.activeConstellation;
+  } else {
+    hoveredStar = findHoveredStar();
+    hoveredConstellation = hoveredStar
+      ? null
+      : findHoveredConstellation();
+  }
+
 
   if (hoveredStar || hoveredConstellation) {
     drawTooltip(
@@ -536,6 +574,19 @@ function drawSky() {
     x: 0,
     y: 0
   };
+
+  canvas.addEventListener("click", () => {
+    story.enabled = !story.enabled;
+
+    if (story.enabled) {
+      advanceStory();
+      storyTimer = setInterval(advanceStory, STORY_INTERVAL);
+    } else {
+      clearInterval(storyTimer);
+      story.activeConstellation = null;
+    }
+  });
+
 
   canvas.addEventListener("mousemove", e => {
     const rect = canvas.getBoundingClientRect();
@@ -601,7 +652,60 @@ function drawSky() {
 
   let lastTime = performance.now();
 
+
+function isOnScreen(p, margin = 40) {
+  return (
+    p.x >= -margin &&
+    p.x <= window.innerWidth + margin &&
+    p.y >= -margin &&
+    p.y <= window.innerHeight + margin
+  );
+}
+
+
+function getVisibleConstellationsInView() {
+  const visible = [];
+
+  const cx = window.innerWidth / 2;
+  const cy = window.innerHeight / 2;
+  const maxDist = Math.min(cx, cy) * 0.85; 
+
+  for (const abr in constellations) {
+    const centroid = getConstellationCentroid(abr);
+    if (!centroid) continue;
+
+    const dx = centroid.x - cx;
+    const dy = centroid.y - cy;
+    const dist = Math.hypot(dx, dy);
+
+    // must be clearly inside the view
+    if (dist < maxDist) {
+      visible.push(abr);
+    }
+  }
+
+  return visible;
+}
+
+
+
+
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+
   function animate(time) {
+
+    if (story.enabled && story.activeConstellation) {
+      const targetFov = BASE_FOV * ZOOM_FACTOR;
+      camera.fov = lerp(camera.fov, targetFov, ZOOM_SPEED);
+    } else {
+      camera.fov = lerp(camera.fov, BASE_FOV, ZOOM_SPEED);
+    }
+
+
     const dt = (time - lastTime) / 1000;
     lastTime = time;
 
@@ -610,9 +714,35 @@ function drawSky() {
     atmosphere.x *= 0.98;
     atmosphere.y *= 0.98;
 
+
+    currentLST = getLocalSiderealTime(Date.now(), observer.lon);
+
     drawSky();
     requestAnimationFrame(animate);
   }
+
+  function advanceStory() {
+    if (!story.enabled) return;
+
+    const next = pickRandomVisibleConstellation();
+    if (!next) return;
+
+    story.activeConstellation = next;
+    story.startTime = performance.now();
+
+    // remember it
+    visitedConstellations.push(next);
+    if (visitedConstellations.length > MAX_VISITED) {
+      visitedConstellations.shift();
+    }
+
+    setTimeout(() => {
+      if (!story.enabled) return;
+      story.activeConstellation = null;
+    }, STORY_INTERVAL - 1500);
+  }
+
+
 
   requestAnimationFrame(animate);
 
@@ -701,3 +831,48 @@ function drawTooltip(x, y, text) {
     ctx.fillText(l, x + padding, y + padding + i * lineHeight)
   );
 }
+
+
+
+function getConstellationCentroid(abr) {
+  let sx = 0, sy = 0, n = 0;
+
+  for (const [a, b] of constellations[abr]) {
+    const sa = starById[a];
+    const sb = starById[b];
+    if (!sa || !sb) continue;
+
+    const pa = projectStar(sa);
+    const pb = projectStar(sb);
+    if (!pa || !pb) continue;
+
+    sx += pa.x + pb.x;
+    sy += pa.y + pb.y;
+    n += 2;
+  }
+
+  if (n === 0) return null;
+
+  return {
+    x: sx / n,
+    y: sy / n
+  };
+}
+
+
+
+
+function pickRandomVisibleConstellation() {
+  const visible = getVisibleConstellationsInView();
+  if (visible.length === 0) return null;
+
+  const unvisited = visible.filter(
+    abr => !visitedConstellations.includes(abr)
+  );
+
+  const pool = unvisited.length > 0 ? unvisited : visible;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+
+
